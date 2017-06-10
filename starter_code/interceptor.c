@@ -368,6 +368,35 @@ asmlinkage long my_syscall(int cmd, int syscall, int pid) {
 		}
 	}
 
+	// Check comand context
+	if (!table[syscall].intercepted && cmd == REQUEST_SYSCALL_RELEASE)
+	{
+		// Cannot de-intercept a system call that has not been intercepted yet.
+		return -EINVAL;
+	}
+
+	if ((!table[syscall].intercepted || !check_pid_monitored(syscall, pid)) &&
+		cmd == REQUEST_STOP_MONITORING)
+	{
+		// Cannot stop monitoring for a pid that is not being monitored, or if the
+    // system call has not been intercepted yet.
+		return -EINVAL;
+	}
+
+	// Check for -EBUSY conditions
+	if (table[syscall].intercepted && cmd == REQUEST_SYSCALL_INTERCEPT)
+	{
+		// Cannot intercept a system call that is already intercepted.
+		return -EBUSY;
+	}
+
+	if (check_pid_monitored(syscall, pid) && cmd == REQUEST_START_MONITORING)
+	{
+		// Cannot stop monitoring a pid that is already being monitored.
+		return -EBUSY;
+	}
+
+
 
 
 
