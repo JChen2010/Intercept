@@ -341,6 +341,7 @@ asmlinkage long my_syscall(int cmd, int syscall, int pid) {
 		return -EINVAL;
 	}
 
+
 	if (cmd == REQUEST_START_MONITORING || cmd == REQUEST_STOP_MONITORING)
 	{
 		// check if pid is valid arg
@@ -359,49 +360,69 @@ asmlinkage long my_syscall(int cmd, int syscall, int pid) {
 			return -EPERM;
 		}
 
-	} else if (cmd == REQUEST_SYSCALL_INTERCEPT || cmd == REQUEST_SYSCALL_RELEASE)
-	{
-		// For the first two commands, we must be root
-		if (!current_uid())
-		{
+	}
+
+	// TODO: consolidate above checks and move them to the main control flow below
+	if (cmd == REQUEST_SYSCALL_INTERCEPT) {
+		if (current_uid() != 0) { // Must be root to execute this command
 			return -EPERM;
 		}
-	}
 
-	// Check comand context
-	if (!table[syscall].intercepted && cmd == REQUEST_SYSCALL_RELEASE)
-	{
+		// Cannot intercept a system call that is already intercepted
+		if (table[syscall].intercepted) {
+			return -EBUSY;
+		} else { // All is good, start the interception
+			// Set the original syscall
+			table[syscall].f = sys_call_table[syscall];
+
+			// Set the status
+			table[syscall].intercepted = 1;
+
+			// Obtain the lock before entering the critical section
+			spin_lock(&calltable_lock);
+
+			// Set sys_call_table to read-write
+			set_addr_rw(sys_call_table);
+
+			// Replace syscall with the custom syscall
+			sys_call_table[syscall] = &interceptor;
+
+			// Set sys_call_table back to read-only
+			set_addr_ro(sys_call_table);
+
+			// Release the lock we have obtained
+			spin_unlock(&calltable_lock);
+
+		}
+	} else if (cmd == REQUEST_SYSCALL_RELEASE) {
+		if (current_uid() != 0) { // Must be root to execute this command
+			return -EPERM;
+		}
+
 		// Cannot de-intercept a system call that has not been intercepted yet.
-		return -EINVAL;
-	}
+		if (!table[syscall].intercepted) {
+			return -EINVAL;
+		} else {
+			// Set the syscall to be intercepted
+			table[syscall].intercepted = 0;
+		}
+	} else if (cmd == REQUEST_START_MONITORING) {
+		// TODO: - If a pid cannot be added to a monitored list, due to no memory
+		// being available, an -ENOMEM error code should be returned.
 
-	if ((!table[syscall].intercepted || !check_pid_monitored(syscall, pid)) &&
-		cmd == REQUEST_STOP_MONITORING)
-	{
-		// Cannot stop monitoring for a pid that is not being monitored, or if the
-    // system call has not been intercepted yet.
-		return -EINVAL;
-	}
-
-	// Check for -EBUSY conditions
-	if (table[syscall].intercepted && cmd == REQUEST_SYSCALL_INTERCEPT)
-	{
-		// Cannot intercept a system call that is already intercepted.
-		return -EBUSY;
-	}
-
-	if (check_pid_monitored(syscall, pid) && cmd == REQUEST_START_MONITORING)
-	{
 		// Cannot stop monitoring a pid that is already being monitored.
-		return -EBUSY;
+		if (check_pid_monitored(syscall, pid)) {
+			return -EBUSY;
+		}
+
+	} else if (cmd == REQUEST_STOP_MONITORING) {
+		// Cannot stop monitoring for a pid that is not being monitored,
+		// or if the system call has not been intercepted yet.
+		if (!table[syscall].intercepted || !check_pid_monitored(syscall, pid)) {
+			return -EINVAL;
+		}
+
 	}
-
-
-
-
-
-
-
 
 
 	return 0;
