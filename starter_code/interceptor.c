@@ -335,34 +335,12 @@ asmlinkage long interceptor(struct pt_regs reg) {
  *   you might be holding, before you exit the function (including error cases!).
  */
 asmlinkage long my_syscall(int cmd, int syscall, int pid) {
-	// check if syscall is valid arg
-	if (syscall < 0 || syscall > NR_syscalls || syscall == MY_CUSTOM_SYSCALL)
-	{
+	// syscall cannot be negative, greater than NR_syscalls, or the custom syscall
+	if (syscall < 0 || syscall > NR_syscalls || syscall == MY_CUSTOM_SYSCALL) {
 		return -EINVAL;
 	}
 
-
-	if (cmd == REQUEST_START_MONITORING || cmd == REQUEST_STOP_MONITORING)
-	{
-		// check if pid is valid arg
-		if (pid < 0 || !pid_task(find_vpid(pid), PIDTYPE_PID))
-		{
-			return -EINVAL;
-		}
-
-		// check perm
-		// - is the calling process root? if so, all is good, no doubts about permissions.
- 		// - if not, then check if the 'pid' requested is owned by the calling process
- 		// - also, if 'pid' is 0 and the calling process is not root, then access is denied
- 		// (monitoring all pids is allowed only for root, obviously).
-		if (!current_uid() && (!check_pid_from_list(getpid(), pid) || pid == 0))
-		{
-			return -EPERM;
-		}
-
-	}
-
-	// TODO: consolidate above checks and move them to the main control flow below
+	// The main control-flow
 	if (cmd == REQUEST_SYSCALL_INTERCEPT) {
 		if (current_uid() != 0) { // Must be root to execute this command
 			return -EPERM;
@@ -392,32 +370,70 @@ asmlinkage long my_syscall(int cmd, int syscall, int pid) {
 
 			// Release the lock we have obtained
 			spin_unlock(&calltable_lock);
-
 		}
 	} else if (cmd == REQUEST_SYSCALL_RELEASE) {
 		if (current_uid() != 0) { // Must be root to execute this command
 			return -EPERM;
 		}
 
-		// Cannot de-intercept a system call that has not been intercepted yet.
+		// Cannot de-intercept a system call that has not been intercepted yet
 		if (!table[syscall].intercepted) {
 			return -EINVAL;
 		} else {
-			// Set the syscall to be intercepted
+			// Reset the syscall status
 			table[syscall].intercepted = 0;
+			table[syscall].monitored = 0;
+
+			// Clear the list of monitored pids for the syscall
+			destroy_list(syscall);
+
+			// Obtain the lock before entering the critical section
+			spin_lock(&calltable_lock);
+
+			// Set sys_call_table to read-write
+			set_addr_rw(sys_call_table);
+
+			// Restore the original syscall
+			sys_call_table[syscall] = table[syscall].f;
+
+			// Set sys_call_table back to read-only
+			set_addr_ro(sys_call_table);
+
+			// Release the lock we have obtained
+			spin_unlock(&calltable_lock);
 		}
 	} else if (cmd == REQUEST_START_MONITORING) {
 		// TODO: - If a pid cannot be added to a monitored list, due to no memory
-		// being available, an -ENOMEM error code should be returned.
+		// being available, an -ENOMEM error code should be returned
 
-		// Cannot stop monitoring a pid that is already being monitored.
+		// The pid cannot be negative and it must belongs to a valid process
+		if (pid < 0 || !pid_task(find_vpid(pid), PIDTYPE_PID)) {
+			return -EINVAL;
+		}
+
+		// If not root, the pid must belongs to the calling process and cannot be 0
+		if (!current_uid() && (!check_pid_from_list(getpid(), pid) || pid == 0)) {
+			return -EPERM;
+		}
+
+		// Cannot stop monitoring a pid that is already being monitored
 		if (check_pid_monitored(syscall, pid)) {
 			return -EBUSY;
 		}
 
 	} else if (cmd == REQUEST_STOP_MONITORING) {
+		// The pid cannot be negative and it must belongs to a valid process
+		if (pid < 0 || !pid_task(find_vpid(pid), PIDTYPE_PID)) {
+			return -EINVAL;
+		}
+
+		// If not root, the pid must belongs to the calling process and cannot be 0
+		if (!current_uid() && (!check_pid_from_list(getpid(), pid) || pid == 0)) {
+			return -EPERM;
+		}
+
 		// Cannot stop monitoring for a pid that is not being monitored,
-		// or if the system call has not been intercepted yet.
+		// or if the system call has not been intercepted yet
 		if (!table[syscall].intercepted || !check_pid_monitored(syscall, pid)) {
 			return -EINVAL;
 		}
