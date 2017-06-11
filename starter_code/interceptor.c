@@ -251,7 +251,7 @@ void (*orig_exit_group)(int);
  */
 void my_exit_group(int status)
 {
-	if ()
+
 
 
 
@@ -374,13 +374,13 @@ asmlinkage long my_syscall(int cmd, int syscall, int pid) {
 			spin_lock(&calltable_lock);
 
 			// Set sys_call_table to read-write
-			set_addr_rw(sys_call_table);
+			set_addr_rw((unsigned long) sys_call_table);
 
 			// Replace syscall with the custom syscall
 			sys_call_table[syscall] = &interceptor;
 
 			// Set sys_call_table back to read-only
-			set_addr_ro(sys_call_table);
+			set_addr_ro((unsigned long) sys_call_table);
 
 			// Release the lock we have obtained
 			spin_unlock(&calltable_lock);
@@ -405,13 +405,13 @@ asmlinkage long my_syscall(int cmd, int syscall, int pid) {
 			spin_lock(&calltable_lock);
 
 			// Set sys_call_table to read-write
-			set_addr_rw(sys_call_table);
+			set_addr_rw((unsigned long) sys_call_table);
 
 			// Restore the original syscall
 			sys_call_table[syscall] = table[syscall].f;
 
 			// Set sys_call_table back to read-only
-			set_addr_ro(sys_call_table);
+			set_addr_ro((unsigned long) sys_call_table);
 
 			// Release the lock we have obtained
 			spin_unlock(&calltable_lock);
@@ -426,7 +426,7 @@ asmlinkage long my_syscall(int cmd, int syscall, int pid) {
 		}
 
 		// If not root, the pid must belongs to the calling process and cannot be 0
-		if (!current_uid() && (!check_pid_from_list(getpid(), pid) || pid == 0)) {
+		if (!current_uid() && (!check_pid_from_list(current->pid, pid) || pid == 0)) {
 			return -EPERM;
 		}
 
@@ -442,7 +442,7 @@ asmlinkage long my_syscall(int cmd, int syscall, int pid) {
 		}
 
 		// If not root, the pid must belongs to the calling process and cannot be 0
-		if (!current_uid() && (!check_pid_from_list(getpid(), pid) || pid == 0)) {
+		if (!current_uid() && (!check_pid_from_list(current->pid, pid) || pid == 0)) {
 			return -EPERM;
 		}
 
