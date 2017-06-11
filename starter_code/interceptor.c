@@ -276,11 +276,25 @@ void my_exit_group(int status)
  *     ax, bx, cx, dx, si, di, and bp registers (see the pt_regs struct).
  * - Don't forget to call the original system call, so we allow processes to proceed as normal.
  */
-asmlinkage long interceptor(struct pt_regs reg) {
+asmlinkage long interceptor(struct pt_regs reg) { // In kernel mode
+	// syscall is stored in the 'ax' register
+	int syscall = reg.ax;
 
+	if (table[syscall].intercepted) {
+		// Test message
+		printk(KERN_DEBUG "");
 
+		if (table[syscall].monitored) {
+			// TODO: handle the monitored case
+		} else {
+			// Log the system call parameters
+			log_message(current->pid, syscall, reg.bx, reg.cx, reg.dx, reg.si, reg.di,
+				reg.bp);
+		}
 
-
+		// Call the original system call to proceed as normal
+		return table[syscall].f(reg);
+	}
 
 	return 0; // Just a placeholder, so it compiles with no warnings!
 }
