@@ -321,14 +321,14 @@ int syscall_intercept (int cmd, int syscall) {
 	} 
 	else { // All is good, start the interception
 
+		// Obtain the lock before entering the critical section
+		spin_lock(&calltable_lock);
+
 		// Set the original syscall
 		table[syscall].f = sys_call_table[syscall];
 
 		// Set the status
 		table[syscall].intercepted = 1;
-
-		// Obtain the lock before entering the critical section
-		spin_lock(&calltable_lock);
 
 		// Set sys_call_table to read-write
 		set_addr_rw((unsigned long) sys_call_table);
@@ -356,15 +356,11 @@ int syscall_release (int cmd, int syscall) {
 		return -EINVAL;
 	} 
 	else {
-		// Reset the syscall status
-		table[syscall].intercepted = 0;
-		table[syscall].monitored = 0;
+		// Obtain the lock before entering the critical section
+		spin_lock(&calltable_lock);
 
 		// Clear the list of monitored pids for the syscall
 		destroy_list(syscall);
-
-		// Obtain the lock before entering the critical section
-		spin_lock(&calltable_lock);
 
 		// Set sys_call_table to read-write
 		set_addr_rw((unsigned long) sys_call_table);
@@ -374,6 +370,10 @@ int syscall_release (int cmd, int syscall) {
 
 		// Set sys_call_table back to read-only
 		set_addr_ro((unsigned long) sys_call_table);
+
+		// Reset the syscall status
+		table[syscall].intercepted = 0;
+		table[syscall].monitored = 0;
 
 		// Release the lock we have obtained
 		spin_unlock(&calltable_lock);
@@ -418,10 +418,11 @@ int start_monitoring (int cmd, int syscall, int pid) {
 		// Remove white/black list
 		spin_lock(&pidlist_lock);
 		destroy_list(syscall);
-		spin_unlock(&pidlist_lock);
 
 		// Set monitored = 2
 		table[syscall].monitored = 2;
+
+		spin_unlock(&pidlist_lock);
 	}
 	// Regular case - attempt to monitor a specific pid
 	else {
@@ -448,17 +449,15 @@ int start_monitoring (int cmd, int syscall, int pid) {
 			}
 
 			// Start monitoring by adding it to the whitelist.
-			spin_lock(&pidlist_lock);
 
 			if (add_pid_sysc(pid, syscall) != 0) {
 				return -ENOMEM;
 			}
 
-			spin_unlock(&pidlist_lock);
-
 			// Set monitored = 1
+			spin_lock(&pidlist_lock);
 			table[syscall].monitored = 1;
-
+			spin_unlock(&pidlist_lock);
 		}
 	}
 	return 0;
@@ -496,10 +495,11 @@ int stop_monitoring (int cmd, int syscall, int pid) {
 		// Remove white/black list
 		spin_lock(&pidlist_lock);
 		destroy_list(syscall);
-		spin_unlock(&pidlist_lock);
 
 		// Set monitored = 0
 		table[syscall].monitored = 0;
+
+		spin_unlock(&pidlist_lock);
 	}
 	// Regular case - attempt to stop monitoring a specific pid
 	else {
@@ -512,15 +512,12 @@ int stop_monitoring (int cmd, int syscall, int pid) {
 			}
 
 			// Stop monitoring by adding it to the blacklist.
-			spin_lock(&pidlist_lock);
 			if (add_pid_sysc(pid, syscall) != 0) {
 				return -ENOMEM;
 			}
-			spin_unlock(&pidlist_lock);
 		}
 		// In whitelist mode
 		else {
-
 			// Can only stop monitoring a pid that is in the whitelist
 			if (!check_pid_monitored(syscall, pid)) {
 				return -EINVAL;
@@ -627,6 +624,8 @@ long (*orig_custom_syscall)(void);
  * - Ensure synchronization as needed.
  */
 static int init_function(void) {
+	// Acquire lock for access to sys_call_table and table
+	spin_lock(&calltable_lock);
 
 	// Peform initializations for bookkeeping data structures
 	int i;
@@ -641,8 +640,7 @@ static int init_function(void) {
 	orig_custom_syscall = sys_call_table[MY_CUSTOM_SYSCALL];
 	orig_exit_group = sys_call_table[__NR_exit_group];
 
-	// Acquire lock for access to sys_call_table, and set to rw
-	spin_lock(&calltable_lock);
+	// Set sys_call_table to rw
 	set_addr_rw((unsigned long) sys_call_table);
 
 	// Hijack MY_CUSTOM_SYSCALL and __NR_exit_group
