@@ -450,7 +450,7 @@ int start_monitoring (int cmd, int syscall, int pid) {
 			// Start monitoring by adding it to the whitelist.
 			spin_lock(&pidlist_lock);
 
-			if (add_pid_sysc(pid, syscall)) {
+			if (add_pid_sysc(pid, syscall) != 0) {
 				return -ENOMEM;
 			}
 
@@ -513,7 +513,9 @@ int stop_monitoring (int cmd, int syscall, int pid) {
 
 			// Stop monitoring by adding it to the blacklist.
 			spin_lock(&pidlist_lock);
-			add_pid_sysc(pid, syscall);
+			if (add_pid_sysc(pid, syscall) != 0) {
+				return -ENOMEM;
+			}
 			spin_unlock(&pidlist_lock);
 		}
 		// In whitelist mode
