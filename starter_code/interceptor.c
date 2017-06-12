@@ -373,7 +373,7 @@ asmlinkage long my_syscall(int cmd, int syscall, int pid) {
 		// Cannot intercept a system call that is already intercepted
 		if (table[syscall].intercepted) {
 			return -EBUSY;
-		} 
+		}
 		else { // All is good, start the interception
 
 			// Set the original syscall
@@ -397,7 +397,7 @@ asmlinkage long my_syscall(int cmd, int syscall, int pid) {
 			// Release the lock we have obtained
 			spin_unlock(&calltable_lock);
 		}
-	} 
+	}
 	else if (cmd == REQUEST_SYSCALL_RELEASE) {
 		if (current_uid() != 0) { // Must be root to execute this command
 			return -EPERM;
@@ -406,7 +406,7 @@ asmlinkage long my_syscall(int cmd, int syscall, int pid) {
 		// Cannot de-intercept a system call that has not been intercepted yet
 		if (!table[syscall].intercepted) {
 			return -EINVAL;
-		} 
+		}
 		else {
 			// Reset the syscall status
 			table[syscall].intercepted = 0;
@@ -430,7 +430,7 @@ asmlinkage long my_syscall(int cmd, int syscall, int pid) {
 			// Release the lock we have obtained
 			spin_unlock(&calltable_lock);
 		}
-	} 
+	}
 	else if (cmd == REQUEST_START_MONITORING) {
 		// The syscall must already have been intercepted
 		if (!table[syscall].intercepted) {
@@ -497,17 +497,21 @@ asmlinkage long my_syscall(int cmd, int syscall, int pid) {
 				}
 
 				// Start monitoring by adding it to the whitelist.
-				// Note that add_pid_sysc already returns -ENOMEM on failure, so 
+				// Note that add_pid_sysc already returns -ENOMEM on failure, so
 				// there is no need to check this again.
 				spin_lock(&pidlist_lock);
-				add_pid_sysc(pid, syscall);
+
+				if (add_pid_sysc(pid, syscall)) { // Catch the ENOMEM exception
+					return -ENOMEM;
+				}
+
 				spin_unlock(&pidlist_lock);
 
 				// Set monitored = 1
 				table[syscall].monitored = 1;
 			}
 		}
-	} 
+	}
 	else if (cmd == REQUEST_STOP_MONITORING) {
 		// The pid cannot be negative and it must belongs to a valid process
 		if ((pid < 0) || ((pid_task(find_vpid(pid), PIDTYPE_PID) == NULL) && (pid != 0))) {
@@ -556,7 +560,11 @@ asmlinkage long my_syscall(int cmd, int syscall, int pid) {
 
 				// Stop monitoring by adding it to the blacklist.
 				spin_lock(&pidlist_lock);
-				add_pid_sysc(pid, syscall);
+
+				if (add_pid_sysc(pid, syscall)) { // Catch the ENOMEM exception
+					return -ENOMEM;
+				}
+
 				spin_unlock(&pidlist_lock);
 			}
 			// In whitelist mode
