@@ -251,10 +251,17 @@ void (*orig_exit_group)(int);
  */
 void my_exit_group(int status)
 {
+	// Acquire lock for pid list access
+	spin_lock(&pidlist_lock);
 
+	// Remove the pid from all lists of monitored pids
+	del_pid(current->pid);
 
+	// Release lock for pid list access
+	spin_unlock(&pidlist_lock);
 
-
+	// Call the original exit_group
+	orig_exit_group(status);
 }
 //----------------------------------------------------------------
 
@@ -277,26 +284,36 @@ void my_exit_group(int status)
  * - Don't forget to call the original system call, so we allow processes to proceed as normal.
  */
 asmlinkage long interceptor(struct pt_regs reg) { // In kernel mode
+
 	// syscall is stored in the 'ax' register
-	int syscall = reg.ax;
+	int syscall;
+	syscall = reg.ax;
 
-	if (table[syscall].intercepted) {
-		// Test message
-		printk(KERN_DEBUG "");
+// I don't think this is how the .intercepted field is meant to be used. This function should simply
+// check monitoring status (not yet implemented), and then just log a message and call the syscall.
 
-		if (table[syscall].monitored) {
-			// TODO: handle the monitored case
-		} else {
-			// Log the system call parameters
-			log_message(current->pid, syscall, reg.bx, reg.cx, reg.dx, reg.si, reg.di,
-				reg.bp);
-		}
+//	if (table[syscall].intercepted) {
 
-		// Call the original system call to proceed as normal
-		return table[syscall].f(reg);
-	}
+	// Test message
+	//printk(KERN_DEBUG "");
 
-	return 0; // Just a placeholder, so it compiles with no warnings!
+	// Problematic check: without monitoring, it should be that all pids are monitored.
+	// However, since by default, we should initialized monitored = 0, this function
+	// will always do nothing before monitoring is implemented.
+	//if (table[syscall].monitored) {
+		// TODO: handle the monitored case
+	//} else {
+
+		// Log the system call parameters
+		log_message(current->pid, reg.ax, reg.bx, reg.cx, reg.dx, reg.si, reg.di,
+			reg.bp);
+	//}
+
+	// Call the original system call to proceed as normal
+	return table[syscall].f(reg);
+//	}
+
+	//return 0; // Just a placeholder, so it compiles with no warnings!
 }
 
 /**
@@ -363,7 +380,9 @@ asmlinkage long my_syscall(int cmd, int syscall, int pid) {
 		// Cannot intercept a system call that is already intercepted
 		if (table[syscall].intercepted) {
 			return -EBUSY;
-		} else { // All is good, start the interception
+		} 
+		else { // All is good, start the interception
+
 			// Set the original syscall
 			table[syscall].f = sys_call_table[syscall];
 
@@ -377,7 +396,7 @@ asmlinkage long my_syscall(int cmd, int syscall, int pid) {
 			set_addr_rw((unsigned long) sys_call_table);
 
 			// Replace syscall with the custom syscall
-			sys_call_table[syscall] = &interceptor;
+			sys_call_table[syscall] = interceptor;
 
 			// Set sys_call_table back to read-only
 			set_addr_ro((unsigned long) sys_call_table);
@@ -385,7 +404,8 @@ asmlinkage long my_syscall(int cmd, int syscall, int pid) {
 			// Release the lock we have obtained
 			spin_unlock(&calltable_lock);
 		}
-	} else if (cmd == REQUEST_SYSCALL_RELEASE) {
+	} 
+	else if (cmd == REQUEST_SYSCALL_RELEASE) {
 		if (current_uid() != 0) { // Must be root to execute this command
 			return -EPERM;
 		}
@@ -393,7 +413,8 @@ asmlinkage long my_syscall(int cmd, int syscall, int pid) {
 		// Cannot de-intercept a system call that has not been intercepted yet
 		if (!table[syscall].intercepted) {
 			return -EINVAL;
-		} else {
+		} 
+		else {
 			// Reset the syscall status
 			table[syscall].intercepted = 0;
 			table[syscall].monitored = 0;
@@ -416,7 +437,8 @@ asmlinkage long my_syscall(int cmd, int syscall, int pid) {
 			// Release the lock we have obtained
 			spin_unlock(&calltable_lock);
 		}
-	} else if (cmd == REQUEST_START_MONITORING) {
+	} 
+	else if (cmd == REQUEST_START_MONITORING) {
 		// TODO: - If a pid cannot be added to a monitored list, due to no memory
 		// being available, an -ENOMEM error code should be returned
 
@@ -435,7 +457,8 @@ asmlinkage long my_syscall(int cmd, int syscall, int pid) {
 			return -EBUSY;
 		}
 
-	} else if (cmd == REQUEST_STOP_MONITORING) {
+	} 
+	else if (cmd == REQUEST_STOP_MONITORING) {
 		// The pid cannot be negative and it must belongs to a valid process
 		if (pid < 0 || !pid_task(find_vpid(pid), PIDTYPE_PID)) {
 			return -EINVAL;
@@ -451,9 +474,7 @@ asmlinkage long my_syscall(int cmd, int syscall, int pid) {
 		if (!table[syscall].intercepted || !check_pid_monitored(syscall, pid)) {
 			return -EINVAL;
 		}
-
 	}
-
 
 	return 0;
 }
@@ -481,11 +502,30 @@ long (*orig_custom_syscall)(void);
  */
 static int init_function(void) {
 
+	// Peform initializations for bookkeeping data structures
+	int i;
+	for (i = 0; i < NR_syscalls+1; i++) {
+		table[i].intercepted = 0;
+		table[i].monitored = 0;
+		table[i].listcount = 0;
+		INIT_LIST_HEAD (&table[i].my_list);
+	}
 
+	// Save the original MY_CUSTOM_SYSCALL and __NR_exit_group.
+	orig_custom_syscall = sys_call_table[MY_CUSTOM_SYSCALL];
+	orig_exit_group = sys_call_table[__NR_exit_group];
 
+	// Acquire lock for access to sys_call_table, and set to rw
+	spin_lock(&calltable_lock);
+	set_addr_rw((unsigned long) sys_call_table);
 
+	// Hijack MY_CUSTOM_SYSCALL and __NR_exit_group
+	sys_call_table[MY_CUSTOM_SYSCALL] = my_syscall;
+	sys_call_table[__NR_exit_group] = my_exit_group;
 
-
+	// Set sys_call_table to ro, and release lock
+	set_addr_ro((unsigned long) sys_call_table);
+	spin_unlock(&calltable_lock);
 
 	return 0;
 }
@@ -502,11 +542,22 @@ static int init_function(void) {
  */
 static void exit_function(void)
 {
+	// Question: do we release intercepted syscalls? This seems like a natural
+	// thing to do, but the instructions don't specify it.
 
+	// Acquire lock and set sys_call_table to rw
+	spin_lock(&calltable_lock);
+	set_addr_rw((unsigned long) sys_call_table);
 
+	// Restore MY_CUSTOM_SYSCALL to the original syscall.
+	sys_call_table[MY_CUSTOM_SYSCALL] = orig_custom_syscall;
 
+	//Restore __NR_exit_group to its original syscall.
+	sys_call_table[__NR_exit_group] = orig_exit_group;
 
-
+	// Set sys_call_table to ro, and release lock
+	set_addr_ro((unsigned long) sys_call_table);
+	spin_unlock(&calltable_lock);
 
 }
 
