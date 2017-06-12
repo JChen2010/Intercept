@@ -442,6 +442,7 @@ int start_monitoring (int cmd, int syscall, int pid) {
 		}
 		// In whitelist mode
 		else {
+			int add_pid_sysc_ret;
 
 			// Can only monitor a pid that is not already being monitored
 			if (check_pid_monitored(syscall, pid)) {
@@ -449,8 +450,11 @@ int start_monitoring (int cmd, int syscall, int pid) {
 			}
 
 			// Start monitoring by adding it to the whitelist.
+			spin_lock(&pidlist_lock);
+			add_pid_sysc_ret = add_pid_sysc(pid, syscall);
+			spin_unlock(&pidlist_lock);
 
-			if (add_pid_sysc(pid, syscall) != 0) {
+			if (add_pid_sysc_ret != 0) {
 				return -ENOMEM;
 			}
 
@@ -505,16 +509,22 @@ int stop_monitoring (int cmd, int syscall, int pid) {
 	else {
 		// In blacklist mode
 		if (table[syscall].monitored == 2) {
+			int add_pid_sysc_ret;
 
 			// Can only stop monitoring a pid that is not in the blacklist
 			if (check_pid_monitored(syscall, pid)) {
 				return -EINVAL;
 			}
 
-			// Stop monitoring by adding it to the blacklist.
-			if (add_pid_sysc(pid, syscall) != 0) {
+			// Start monitoring by adding it to the whitelist.
+			spin_lock(&pidlist_lock);
+			add_pid_sysc_ret = add_pid_sysc(pid, syscall);
+			spin_unlock(&pidlist_lock);
+
+			if (add_pid_sysc_ret != 0) {
 				return -ENOMEM;
 			}
+
 		}
 		// In whitelist mode
 		else {
@@ -624,11 +634,12 @@ long (*orig_custom_syscall)(void);
  * - Ensure synchronization as needed.
  */
 static int init_function(void) {
+	int i;
+
 	// Acquire lock for access to sys_call_table and table
 	spin_lock(&calltable_lock);
 
 	// Peform initializations for bookkeeping data structures
-	int i;
 	for (i = 0; i < NR_syscalls+1; i++) {
 		table[i].intercepted = 0;
 		table[i].monitored = 0;
