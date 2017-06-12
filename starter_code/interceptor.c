@@ -309,6 +309,239 @@ asmlinkage long interceptor(struct pt_regs reg) { // In kernel mode
 	return table[syscall].f(reg);
 }
 
+// Helper function to handle REQUEST_SYSCALL_INTERCEPT
+int syscall_intercept (int cmd, int syscall) {
+	if (current_uid() != 0) { // Must be root to execute this command
+		return -EPERM;
+	}
+
+	// Cannot intercept a system call that is already intercepted
+	if (table[syscall].intercepted) {
+		return -EBUSY;
+	}
+	else { // All is good, start the interception
+
+		// Obtain the lock before entering the critical section
+		spin_lock(&calltable_lock);
+
+		// Set the original syscall
+		table[syscall].f = sys_call_table[syscall];
+
+		// Set the status
+		table[syscall].intercepted = 1;
+
+		// Set sys_call_table to read-write
+		set_addr_rw((unsigned long) sys_call_table);
+
+		// Replace syscall with the custom syscall
+		sys_call_table[syscall] = interceptor;
+
+		// Set sys_call_table back to read-only
+		set_addr_ro((unsigned long) sys_call_table);
+
+		// Release the lock we have obtained
+		spin_unlock(&calltable_lock);
+	}
+	return 0;
+}
+
+// Helper function to handle REQUEST_SYSCALL_RELEASE
+int syscall_release (int cmd, int syscall) {
+	if (current_uid() != 0) { // Must be root to execute this command
+		return -EPERM;
+	}
+
+	// Cannot de-intercept a system call that has not been intercepted yet
+	if (!table[syscall].intercepted) {
+		return -EINVAL;
+	}
+	else {
+		// Obtain the lock before entering the critical section
+		spin_lock(&calltable_lock);
+
+		// Clear the list of monitored pids for the syscall
+		destroy_list(syscall);
+
+		// Set sys_call_table to read-write
+		set_addr_rw((unsigned long) sys_call_table);
+
+		// Restore the original syscall
+		sys_call_table[syscall] = table[syscall].f;
+
+		// Set sys_call_table back to read-only
+		set_addr_ro((unsigned long) sys_call_table);
+
+		// Reset the syscall status
+		table[syscall].intercepted = 0;
+		table[syscall].monitored = 0;
+
+		// Release the lock we have obtained
+		spin_unlock(&calltable_lock);
+	}
+	return 0;
+}
+
+// Helper function to handle REQUEST_START_MONITORING
+int start_monitoring (int cmd, int syscall, int pid) {
+	// The syscall must already have been intercepted
+	if (!table[syscall].intercepted) {
+		return -EINVAL;
+	}
+
+	// The pid cannot be negative and it must belongs to a valid process
+	if ((pid < 0) || ((pid_task(find_vpid(pid), PIDTYPE_PID) == NULL) && (pid != 0))) {
+		return -EINVAL;
+	}
+
+	// If not root, the pid must belongs to the calling process and cannot be 0
+	if (current_uid()) {
+		if (pid == 0){
+			return -EPERM;
+		}
+
+		if(check_pid_from_list(current->pid, pid) != 0) {
+			return -EPERM;
+		}
+	}
+
+	// Special case - monitor all pids
+	if (pid == 0) {
+		// Note that expected behaviour is equivalent, regardless of prior mode.
+		// If monitored == 2, then the expected behaviour is to remove the existing
+		// blacklist, since we want to monitor all pids again. If not, then we are
+		// currently in whitelist mode. Since we will be transferring to blacklist
+		// mode, we must remove the existing whitelist, to start with a blank
+		// blacklist since once again, we are monitoring all pids. The only difference
+		// would be that monitored needs to be set to 2 if it is not already, but this
+		// assignment can be present even if it is already equal to 2.
+
+		// Remove white/black list
+		spin_lock(&pidlist_lock);
+		destroy_list(syscall);
+
+		// Set monitored = 2
+		table[syscall].monitored = 2;
+
+		spin_unlock(&pidlist_lock);
+	}
+	// Regular case - attempt to monitor a specific pid
+	else {
+		// In blacklist mode
+		if (table[syscall].monitored == 2) {
+
+			// Can only start monitoring a pid in the blacklist, since all
+			// other pids are already being monitored
+			if (!check_pid_monitored(syscall, pid)) {
+				return -EBUSY;
+			}
+
+			// Start monitoring by removing it from the blacklist
+			spin_lock(&pidlist_lock);
+			del_pid_sysc(pid, syscall);
+			spin_unlock(&pidlist_lock);
+		}
+		// In whitelist mode
+		else {
+			int add_pid_sysc_ret;
+
+			// Can only monitor a pid that is not already being monitored
+			if (check_pid_monitored(syscall, pid)) {
+				return -EBUSY;
+			}
+
+			// Start monitoring by adding it to the whitelist.
+			spin_lock(&pidlist_lock);
+			add_pid_sysc_ret = add_pid_sysc(pid, syscall);
+			spin_unlock(&pidlist_lock);
+
+			if (add_pid_sysc_ret != 0) {
+				return -ENOMEM;
+			}
+
+			// Set monitored = 1
+			spin_lock(&pidlist_lock);
+			table[syscall].monitored = 1;
+			spin_unlock(&pidlist_lock);
+		}
+	}
+	return 0;
+}
+
+// Helper function to handle REQUEST_STOP_MONITORING
+int stop_monitoring (int cmd, int syscall, int pid) {
+	// The pid cannot be negative and it must belongs to a valid process
+	if ((pid < 0) || ((pid_task(find_vpid(pid), PIDTYPE_PID) == NULL) && (pid != 0))) {
+		return -EINVAL;
+	}
+
+	// If not root, the pid must belongs to the calling process and cannot be 0
+	if (current_uid()) {
+		if (pid == 0){
+			return -EPERM;
+		}
+
+		if(check_pid_from_list(current->pid, pid) != 0) {
+			return -EPERM;
+		}
+	}
+
+	// Cannot stop monitoring a system call that has not been intercepted yet
+	if (!table[syscall].intercepted) {
+		return -EINVAL;
+	}
+
+	// Special case - stop monitoring all pids
+	if (pid == 0) {
+		// Similar justification to the same case in REQUEST_START_MONITORING.
+		// It doesn't matter whether we were on a white or black list, since
+		// destroying the list and setting monitored = 0 stops monitoring all pids.
+
+		// Remove white/black list
+		spin_lock(&pidlist_lock);
+		destroy_list(syscall);
+
+		// Set monitored = 0
+		table[syscall].monitored = 0;
+
+		spin_unlock(&pidlist_lock);
+	}
+	// Regular case - attempt to stop monitoring a specific pid
+	else {
+		// In blacklist mode
+		if (table[syscall].monitored == 2) {
+			int add_pid_sysc_ret;
+
+			// Can only stop monitoring a pid that is not in the blacklist
+			if (check_pid_monitored(syscall, pid)) {
+				return -EINVAL;
+			}
+
+			// Start monitoring by adding it to the whitelist.
+			spin_lock(&pidlist_lock);
+			add_pid_sysc_ret = add_pid_sysc(pid, syscall);
+			spin_unlock(&pidlist_lock);
+
+			if (add_pid_sysc_ret != 0) {
+				return -ENOMEM;
+			}
+
+		}
+		// In whitelist mode
+		else {
+			// Can only stop monitoring a pid that is in the whitelist
+			if (!check_pid_monitored(syscall, pid)) {
+				return -EINVAL;
+			}
+
+			// Stop monitoring by removing it from the whitelist
+			spin_lock(&pidlist_lock);
+			del_pid_sysc(pid, syscall);
+			spin_unlock(&pidlist_lock);
+		}
+	}
+	return 0;
+}
+
 /**
  * My system call - this function is called whenever a user issues a MY_CUSTOM_SYSCALL system call.
  * When that happens, the parameters for this system call indicate one of 4 actions/commands:
@@ -363,224 +596,18 @@ asmlinkage long my_syscall(int cmd, int syscall, int pid) {
 	if (syscall < 0 || syscall > NR_syscalls || syscall == MY_CUSTOM_SYSCALL) {
 		return -EINVAL;
 	}
-
 	// The main control-flow
 	if (cmd == REQUEST_SYSCALL_INTERCEPT) {
-		if (current_uid() != 0) { // Must be root to execute this command
-			return -EPERM;
-		}
-
-		// Cannot intercept a system call that is already intercepted
-		if (table[syscall].intercepted) {
-			return -EBUSY;
-		}
-		else { // All is good, start the interception
-
-			// Set the original syscall
-			table[syscall].f = sys_call_table[syscall];
-
-			// Set the status
-			table[syscall].intercepted = 1;
-
-			// Obtain the lock before entering the critical section
-			spin_lock(&calltable_lock);
-
-			// Set sys_call_table to read-write
-			set_addr_rw((unsigned long) sys_call_table);
-
-			// Replace syscall with the custom syscall
-			sys_call_table[syscall] = interceptor;
-
-			// Set sys_call_table back to read-only
-			set_addr_ro((unsigned long) sys_call_table);
-
-			// Release the lock we have obtained
-			spin_unlock(&calltable_lock);
-		}
+		return syscall_intercept(cmd, syscall);
 	}
 	else if (cmd == REQUEST_SYSCALL_RELEASE) {
-		if (current_uid() != 0) { // Must be root to execute this command
-			return -EPERM;
-		}
-
-		// Cannot de-intercept a system call that has not been intercepted yet
-		if (!table[syscall].intercepted) {
-			return -EINVAL;
-		}
-		else {
-			// Reset the syscall status
-			table[syscall].intercepted = 0;
-			table[syscall].monitored = 0;
-
-			// Clear the list of monitored pids for the syscall
-			destroy_list(syscall);
-
-			// Obtain the lock before entering the critical section
-			spin_lock(&calltable_lock);
-
-			// Set sys_call_table to read-write
-			set_addr_rw((unsigned long) sys_call_table);
-
-			// Restore the original syscall
-			sys_call_table[syscall] = table[syscall].f;
-
-			// Set sys_call_table back to read-only
-			set_addr_ro((unsigned long) sys_call_table);
-
-			// Release the lock we have obtained
-			spin_unlock(&calltable_lock);
-		}
+		return syscall_release(cmd, syscall);
 	}
 	else if (cmd == REQUEST_START_MONITORING) {
-		// The syscall must already have been intercepted
-		if (!table[syscall].intercepted) {
-			return -EINVAL;
-		}
-
-		// The pid cannot be negative and it must belongs to a valid process
-		if ((pid < 0) || ((pid_task(find_vpid(pid), PIDTYPE_PID) == NULL) && (pid != 0))) {
-			return -EINVAL;
-		}
-
-		// If not root, the pid must belongs to the calling process and cannot be 0
-		if (current_uid()) {
-			if (pid == 0){
-				return -EPERM;
-			}
-
-			if(check_pid_from_list(current->pid, pid) != 0) {
-				return -EPERM;
-			}
-		}
-
-		// Special case - monitor all pids
-		if (pid == 0) {
-			// Note that expected behaviour is equivalent, regardless of prior mode.
-			// If monitored == 2, then the expected behaviour is to remove the existing
-			// blacklist, since we want to monitor all pids again. If not, then we are
-			// currently in whitelist mode. Since we will be transferring to blacklist
-			// mode, we must remove the existing whitelist, to start with a blank
-			// blacklist since once again, we are monitoring all pids. The only difference
-			// would be that monitored needs to be set to 2 if it is not already, but this
-			// assignment can be present even if it is already equal to 2.
-
-			// Remove white/black list
-			spin_lock(&pidlist_lock);
-			destroy_list(syscall);
-			spin_unlock(&pidlist_lock);
-
-			// Set monitored = 2
-			table[syscall].monitored = 2;
-		}
-		// Regular case - attempt to monitor a specific pid
-		else {
-			// In blacklist mode
-			if (table[syscall].monitored == 2) {
-
-				// Can only start monitoring a pid in the blacklist, since all
-				// other pids are already being monitored
-				if (!check_pid_monitored(syscall, pid)) {
-					return -EBUSY;
-				}
-
-				// Start monitoring by removing it from the blacklist
-				spin_lock(&pidlist_lock);
-				del_pid_sysc(pid, syscall);
-				spin_unlock(&pidlist_lock);
-			}
-			// In whitelist mode
-			else {
-
-				// Can only monitor a pid that is not already being monitored
-				if (check_pid_monitored(syscall, pid)) {
-					return -EBUSY;
-				}
-
-				// Start monitoring by adding it to the whitelist.
-				// Note that add_pid_sysc already returns -ENOMEM on failure, so
-				// there is no need to check this again.
-				spin_lock(&pidlist_lock);
-
-				if (add_pid_sysc(pid, syscall)) { // Catch the ENOMEM exception
-					return -ENOMEM;
-				}
-
-				spin_unlock(&pidlist_lock);
-
-				// Set monitored = 1
-				table[syscall].monitored = 1;
-			}
-		}
+		return start_monitoring(cmd, syscall, pid);
 	}
 	else if (cmd == REQUEST_STOP_MONITORING) {
-		// The pid cannot be negative and it must belongs to a valid process
-		if ((pid < 0) || ((pid_task(find_vpid(pid), PIDTYPE_PID) == NULL) && (pid != 0))) {
-			return -EINVAL;
-		}
-
-		// If not root, the pid must belongs to the calling process and cannot be 0
-		if (current_uid()) {
-			if (pid == 0){
-				return -EPERM;
-			}
-
-			if(check_pid_from_list(current->pid, pid) != 0) {
-				return -EPERM;
-			}
-		}
-
-		// Cannot stop monitoring a system call that has not been intercepted yet
-		if (!table[syscall].intercepted) {
-			return -EINVAL;
-		}
-
-		// Special case - stop monitoring all pids
-		if (pid == 0) {
-			// Similar justification to the same case in REQUEST_START_MONITORING.
-			// It doesn't matter whether we were on a white or black list, since
-			// destroying the list and setting monitored = 0 stops monitoring all pids.
-
-			// Remove white/black list
-			spin_lock(&pidlist_lock);
-			destroy_list(syscall);
-			spin_unlock(&pidlist_lock);
-
-			// Set monitored = 0
-			table[syscall].monitored = 0;
-		}
-		// Regular case - attempt to stop monitoring a specific pid
-		else {
-			// In blacklist mode
-			if (table[syscall].monitored == 2) {
-
-				// Can only stop monitoring a pid that is not in the blacklist
-				if (check_pid_monitored(syscall, pid)) {
-					return -EINVAL;
-				}
-
-				// Stop monitoring by adding it to the blacklist.
-				spin_lock(&pidlist_lock);
-
-				if (add_pid_sysc(pid, syscall)) { // Catch the ENOMEM exception
-					return -ENOMEM;
-				}
-
-				spin_unlock(&pidlist_lock);
-			}
-			// In whitelist mode
-			else {
-
-				// Can only stop monitoring a pid that is in the whitelist
-				if (!check_pid_monitored(syscall, pid)) {
-					return -EINVAL;
-				}
-
-				// Stop monitoring by removing it from the whitelist
-				spin_lock(&pidlist_lock);
-				del_pid_sysc(pid, syscall);
-				spin_unlock(&pidlist_lock);
-			}
-		}
+		return stop_monitoring(cmd, syscall, pid);
 	}
 	return 0;
 }
@@ -607,9 +634,12 @@ long (*orig_custom_syscall)(void);
  * - Ensure synchronization as needed.
  */
 static int init_function(void) {
+	int i;
+
+	// Acquire lock for access to sys_call_table and table
+	spin_lock(&calltable_lock);
 
 	// Peform initializations for bookkeeping data structures
-	int i;
 	for (i = 0; i < NR_syscalls+1; i++) {
 		table[i].intercepted = 0;
 		table[i].monitored = 0;
@@ -621,8 +651,7 @@ static int init_function(void) {
 	orig_custom_syscall = sys_call_table[MY_CUSTOM_SYSCALL];
 	orig_exit_group = sys_call_table[__NR_exit_group];
 
-	// Acquire lock for access to sys_call_table, and set to rw
-	spin_lock(&calltable_lock);
+	// Set sys_call_table to rw
 	set_addr_rw((unsigned long) sys_call_table);
 
 	// Hijack MY_CUSTOM_SYSCALL and __NR_exit_group
@@ -669,4 +698,3 @@ static void exit_function(void)
 
 module_init(init_function);
 module_exit(exit_function);
-
