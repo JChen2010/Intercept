@@ -159,9 +159,9 @@ int do_nonroot(int syscall) {
 	do_stop(syscall, 1, -EPERM);
 	do_start(syscall, getpid(), 0);
 	do_start(syscall, getpid(), -EBUSY);
-	do_monitor(syscall);
+	do_monitor(syscall); // Fail
 	do_stop(syscall, getpid(), 0);
-	do_stop(syscall, getpid(), -EINVAL);
+	do_stop(syscall, getpid(), -EINVAL); // Fail
 	return 0;
 }
 
