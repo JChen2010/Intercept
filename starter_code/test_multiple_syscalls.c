@@ -231,10 +231,12 @@ int main(int argc, char **argv) {
 	do_start(SYS_open, 0, 0);
 	do_intercept(SYS_fork, 0);
 	do_start(SYS_fork, 0, 0);
-	do_release(SYS_open, 0);
-	do_release(SYS_fork, 0);
 	do_stop(SYS_open, 0, 0);
 	do_stop(SYS_fork, 0, 0);
+	do_release(SYS_open, 0);
+	do_release(SYS_fork, 0);
+	do_stop(SYS_open, 0, -EINVAL);
+	do_stop(SYS_fork, 0, -EINVAL);
 
 	test("rmmod interceptor.ko %s", "", system("rmmod interceptor") == 0);
 	return 0

@@ -159,9 +159,9 @@ int do_nonroot(int syscall) {
 	do_stop(syscall, 1, -EPERM);
 	do_start(syscall, getpid(), 0);
 	do_start(syscall, getpid(), -EBUSY);
-	do_monitor(syscall); // Fail
+	do_monitor(syscall);
 	do_stop(syscall, getpid(), 0);
-	do_stop(syscall, getpid(), -EINVAL); // Fail
+	do_stop(syscall, getpid(), -EINVAL);
 	return 0;
 }
 
@@ -224,4 +224,3 @@ int main(int argc, char **argv) {
 	test("rmmod interceptor.ko %s", "", system("rmmod interceptor") == 0);
 	return 0;
 }
-
